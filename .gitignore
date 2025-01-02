@@ -1,6 +1,7 @@
 # Dependency directories
 node_modules/
 dist/
+build/
 
 # Build output
 main.js

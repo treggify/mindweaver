@@ -18,14 +18,18 @@ MindWeaver is an intelligent Obsidian plugin that uses GPT to automatically disc
 ## Configuration
 
 1. Open Settings > Community Plugins > MindWeaver
-2. Enter your OpenAI API key
-3. (Optional) Add special instructions for connection discovery
-4. Adjust the relevance threshold as needed (0-1)
+2. Enable the plugin by clicking the toggle switch
+3. Click the gear icon next to MindWeaver to open settings
+4. Enter your OpenAI API key
+5. (Optional) Add special instructions for connection discovery
+6. Adjust the relevance threshold as needed (0-1)
 
 ## Usage
 
 1. Open any note in your vault
-2. Use the slash command `/weave-connections` or the configured hotkey
+2. You can invoke MindWeaver in two ways:
+   - Type `/` and choose "MindWeaver: Weave Connections"
+   - Open command palette (Cmd/Ctrl + P) and search for "Weave Connections"
 3. MindWeaver will analyze your vault and automatically weave relevant connections
 
 ## Development
@@ -33,7 +37,15 @@ MindWeaver is an intelligent Obsidian plugin that uses GPT to automatically disc
 1. Clone this repository
 2. Install dependencies with `npm install`
 3. Build with `npm run build`
-4. Copy `main.js`, `manifest.json`, and `styles.css` to your vault's plugins directory
+4. Copy the contents of the `build` directory to your vault's plugins directory:
+   ```bash
+   cp build/* <vault>/.obsidian/plugins/mindweaver/
+   ```
+
+The build directory will contain all necessary files:
+- `main.js`: The compiled plugin code
+- `manifest.json`: Plugin manifest
+- `styles.css`: Plugin styles
 
 ## License
 
