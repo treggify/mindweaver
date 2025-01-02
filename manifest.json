@@ -1,0 +1,10 @@
+{
+  "id": "mindweaver",
+  "name": "MindWeaver",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Intelligently weave connections across your knowledge base using GPT",
+  "author": "Your Name",
+  "authorUrl": "https://github.com/yourusername",
+  "isDesktopOnly": false
+}
