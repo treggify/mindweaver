@@ -1,29 +1,202 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, TextAreaComponent, SuggestModal, ButtonComponent } from 'obsidian';
 
 interface AutoBacklinksSettings {
     apiKey: string;
-    specialInstructions: string;
-    excludeFolders: string[];
-    relevanceThreshold: number;
-    slashCommandPrompt: string;
+    togetherApiKey: string;
+    llamaEndpoint: string;
     commandName: string;
-    vaultIndex: { [key: string]: string }; // path -> concepts mapping
-    lastIndexed: number;
+    slashCommandPrompt: string;
+    specialInstructions: string;
+    connectionStrength: 'strict' | 'balanced' | 'relaxed';
+    model: 'gpt-4' | 'gpt-3.5-turbo' | 'llama-2-70b' | 'llama-local';
+    excludedFolders: string[];
 }
 
 const DEFAULT_SETTINGS: AutoBacklinksSettings = {
     apiKey: '',
+    togetherApiKey: '',
+    llamaEndpoint: 'http://localhost:8080',
+    commandName: 'Weave connections',
+    slashCommandPrompt: 'Find meaningful connections between this note and others in the vault.',
     specialInstructions: '',
-    excludeFolders: [],
-    relevanceThreshold: 0.7,
-    slashCommandPrompt: 'Find connections in my notes by analyzing the current note and suggesting relevant links.',
-    commandName: 'Weave Connections',
-    vaultIndex: {},
-    lastIndexed: 0
+    connectionStrength: 'balanced',
+    model: 'gpt-3.5-turbo',
+    excludedFolders: []
 }
+
+const MODEL_PRICING = {
+    'gpt-4': { 
+        name: 'GPT-4',
+        description: 'Most accurate',
+        provider: 'openai',
+        inputPer1k: 0.03, 
+        outputPer1k: 0.06 
+    },
+    'gpt-3.5-turbo': { 
+        name: 'GPT-3.5',
+        description: 'Balanced',
+        provider: 'openai',
+        inputPer1k: 0.001, 
+        outputPer1k: 0.002 
+    },
+    'llama-2-70b': { 
+        name: 'Llama 2 70B',
+        description: 'Low cost',
+        provider: 'together',
+        inputPer1k: 0.0007, 
+        outputPer1k: 0.0007 
+    },
+    'llama-local': {
+        name: 'Llama (Local)',
+        description: 'Free, self-hosted',
+        provider: 'local',
+        inputPer1k: 0,
+        outputPer1k: 0
+    }
+};
 
 export default class AutoBacklinksPlugin extends Plugin {
     settings: AutoBacklinksSettings;
+
+    // Rate limiter for OpenAI API
+    private lastRequestTime = 0;
+    private requestsInLastMinute = 0;
+    private static readonly RPM_LIMIT = 150; // More conservative limit
+    private static readonly MIN_REQUEST_INTERVAL = 500; // 500ms between requests
+
+    private async waitForRateLimit(): Promise<void> {
+        this.requestsInLastMinute++;
+        
+        // Calculate time since last request
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastRequestTime;
+        
+        // If we're approaching the rate limit, wait
+        if (this.requestsInLastMinute >= AutoBacklinksPlugin.RPM_LIMIT) {
+            const waitTime = 60 * 1000; // Wait a full minute
+            console.log(`Approaching rate limit, waiting ${waitTime/1000}s...`);
+            new Notice(`Rate limit approached, waiting ${waitTime/1000}s...`, 2000);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            this.requestsInLastMinute = 0;
+        }
+        
+        // Ensure minimum interval between requests
+        if (timeSinceLastRequest < AutoBacklinksPlugin.MIN_REQUEST_INTERVAL) {
+            const waitTime = AutoBacklinksPlugin.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+        
+        this.lastRequestTime = Date.now();
+    }
+
+    private async makeOpenAIRequest(messages: any[]): Promise<any> {
+        const model = MODEL_PRICING[this.settings.model];
+        
+        if (model.provider === 'together') {
+            return this.makeTogetherRequest(messages);
+        } else if (model.provider === 'local') {
+            return this.makeLlamaRequest(messages);
+        }
+
+        try {
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.settings.apiKey}`
+                },
+                body: JSON.stringify({
+                    model: this.settings.model,
+                    messages: messages,
+                    max_tokens: 100,
+                    temperature: 0.7
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`OpenAI API request failed: ${response.statusText}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error making OpenAI request:', error);
+            throw error;
+        }
+    }
+
+    private async makeTogetherRequest(messages: any[]): Promise<any> {
+        try {
+            const prompt = messages.map(m => 
+                `${m.role}: ${m.content}`
+            ).join('\n');
+
+            const response = await fetch('https://api.together.xyz/inference', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.settings.togetherApiKey}`
+                },
+                body: JSON.stringify({
+                    model: 'togethercomputer/llama-2-70b-chat',
+                    prompt: prompt,
+                    max_tokens: 100,
+                    temperature: 0.7
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Together API request failed: ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            return {
+                choices: [{
+                    message: {
+                        content: result.output.content
+                    }
+                }]
+            };
+        } catch (error) {
+            console.error('Error making Together request:', error);
+            throw error;
+        }
+    }
+
+    private async makeLlamaRequest(messages: any[]): Promise<any> {
+        try {
+            const prompt = messages.map(m => 
+                `${m.role}: ${m.content}`
+            ).join('\n');
+
+            const response = await fetch(`${this.settings.llamaEndpoint}/completion`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    prompt: prompt,
+                    max_tokens: 100,
+                    temperature: 0.7
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Llama API request failed: ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            return {
+                choices: [{
+                    message: {
+                        content: result.content
+                    }
+                }]
+            };
+        } catch (error) {
+            console.error('Error making Llama request:', error);
+            throw error;
+        }
+    }
 
     async onload() {
         console.log('Loading MindWeaver plugin');
@@ -33,7 +206,7 @@ export default class AutoBacklinksPlugin extends Plugin {
         // Add slash command
         this.addCommand({
             id: 'weave-connections',
-            name: this.settings.commandName || 'Weave Connections',
+            name: this.settings.commandName || 'Weave connections',
             callback: () => {
                 console.log('Executing weave-connections command');
                 try {
@@ -45,30 +218,8 @@ export default class AutoBacklinksPlugin extends Plugin {
             }
         });
 
-        // Add command to reindex vault
-        this.addCommand({
-            id: 'reindex-vault',
-            name: 'Reindex Vault',
-            callback: () => {
-                console.log('Executing reindex-vault command');
-                try {
-                    this.indexVault();
-                } catch (error) {
-                    console.error('Error in reindex-vault command:', error);
-                    new Notice('Error reindexing vault. Check console for details.');
-                }
-            }
-        });
-
         // Add settings tab
         this.addSettingTab(new AutoBacklinksSettingTab(this.app, this));
-        
-        // Check if we need to reindex (older than 24 hours)
-        const ONE_DAY = 24 * 60 * 60 * 1000;
-        if (!this.settings.lastIndexed || Date.now() - this.settings.lastIndexed > ONE_DAY) {
-            console.log('Initial indexing needed');
-            this.indexVault();
-        }
         
         console.log('MindWeaver plugin loaded successfully');
     }
@@ -89,203 +240,9 @@ export default class AutoBacklinksPlugin extends Plugin {
         console.log('Settings saved');
     }
 
-    private cleanupLinks(links: string[]): string[] {
-        return links
-            .map(link => {
-                // Extract just the filename from the path
-                const match = link.match(/\[\[(.*?)(\.md)?(\|.*?)?\]\]/);
-                if (!match) return null;
-                
-                let filename = match[1];
-                // Remove any path components
-                filename = filename.split('/').pop() || filename;
-                // Remove .md extension if present
-                filename = filename.replace(/\.md$/, '');
-                return `[[${filename}]]`;
-            })
-            .filter((link): link is string => link !== null);
-    }
-
-    async indexVault() {
-        if (!this.settings.apiKey) {
-            new Notice('Please set your OpenAI API key in the settings');
-            return;
-        }
-
-        try {
-            new Notice('Starting to index vault...');
-
-            const allFiles = this.app.vault.getMarkdownFiles();
-            const MAX_CHUNK_SIZE = 5;
-            const chunks = [];
-
-            for (let i = 0; i < allFiles.length; i += MAX_CHUNK_SIZE) {
-                chunks.push(allFiles.slice(i, i + MAX_CHUNK_SIZE));
-            }
-
-            for (const chunk of chunks) {
-                const fileContents = await Promise.all(
-                    chunk.map(async (file) => ({
-                        path: file.path,
-                        content: await this.app.vault.read(file)
-                    }))
-                );
-
-                const response = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${this.settings.apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        model: "gpt-3.5-turbo",
-                        messages: [
-                            {
-                                role: "system",
-                                content: `You are an expert at extracting key information from text. For each document, extract:
-1. Main topics (e.g., places, people, events, concepts)
-2. Categories (e.g., travel, philosophy, technology)
-3. Geographic locations mentioned
-4. Time periods or dates
-5. Related themes (e.g., adventure, learning, growth)
-
-Format each document's concepts as a structured list.`
-                            },
-                            {
-                                role: "user",
-                                content: `Analyze these documents and extract key concepts for each:\n\n${
-                                    fileContents.map(file => `File: ${file.path}\n${file.content}\n---`).join('\n')
-                                }`
-                            }
-                        ]
-                    })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`OpenAI API error (${response.status}): ${response.statusText}`);
-                }
-
-                const result = await response.json();
-                const concepts = result.choices[0].message.content;
-
-                chunk.forEach((file, i) => {
-                    this.settings.vaultIndex[file.path] = concepts.split('---')[i] || '';
-                });
-
-                await new Promise(resolve => setTimeout(resolve, 200));
-            }
-
-            this.settings.lastIndexed = Date.now();
-            await this.saveSettings();
-            new Notice('Vault indexing complete!');
-
-        } catch (error) {
-            console.error('Error indexing vault:', error);
-            new Notice(`Error: ${error.message || 'Unknown error occurred. Check console for details.'}`);
-        }
-    }
-
-    private async validateAndFilterConnections(connections: string[], currentContent: string): Promise<string[]> {
-        const validConnections: string[] = [];
-        
-        for (const link of connections) {
-            // Extract filename from the link format [[filename]]
-            const match = link.match(/\[\[(.*?)\]\]/);
-            if (!match) continue;
-            
-            const filename = match[1];
-            
-            // Find the actual file in the vault
-            const file = this.app.vault.getAbstractFileByPath(`${filename}.md`);
-            if (!file || !(file instanceof TFile)) continue;
-            
-            try {
-                // Read the content of the potential connection
-                const content = await this.app.vault.read(file as TFile);
-                
-                // Use GPT to verify if this is actually a meaningful connection
-                const response = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${this.settings.apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        model: "gpt-3.5-turbo",
-                        messages: [
-                            {
-                                role: "system",
-                                content: `You are validating if two notes have a meaningful connection.
-A valid connection should share related concepts, ideas, or purpose.
-
-Return ONLY "true" or "false".
-Return "true" if the notes:
-1. Discuss related financial concepts or strategies
-2. Share similar practical advice or methods
-3. Build on similar principles or rules
-4. Reference related sources or ideas
-5. Would provide valuable context for each other
-
-Return "false" if:
-- They only share superficial similarities
-- They only contain similar numbers without context
-- They only have matching tags
-- The connection is extremely vague
-- They are completely different topics
-- One is purely technical/structural and the other is content
-
-For example, return "true" for:
-- Two notes about investment strategies
-- Two notes about financial calculations
-- A rule and its practical application
-- Related financial concepts
-
-Return "false" for:
-- A financial note and a technical specification
-- A money rule and a design principle
-- Two notes that just happen to use percentages
-- Two notes that just share similar formatting`
-                            },
-                            {
-                                role: "user",
-                                content: `Note 1:
-${currentContent}
-
-Note 2:
-${content}
-
-Are these notes meaningfully connected? Reply only with "true" or "false".`
-                            }
-                        ]
-                    })
-                });
-
-                if (!response.ok) continue;
-
-                const result = await response.json();
-                const isValid = result.choices[0].message.content.trim().toLowerCase() === 'true';
-                
-                if (isValid) {
-                    console.log(`Validated connection: ${filename}`);
-                    validConnections.push(link);
-                } else {
-                    console.log(`Rejected connection: ${filename}`);
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 200));
-                
-            } catch (error) {
-                console.error(`Error validating connection ${filename}:`, error);
-                continue;
-            }
-        }
-        
-        return validConnections;
-    }
-
     async generateBacklinks() {
-        if (!this.settings.apiKey) {
-            new Notice('Please set your OpenAI API key in the settings');
+        if (!this.settings.apiKey && !this.settings.togetherApiKey) {
+            new Notice('Please set your OpenAI or Together API key in the settings');
             return;
         }
 
@@ -297,318 +254,542 @@ Are these notes meaningfully connected? Reply only with "true" or "false".`
             }
 
             console.log('Starting connection finding process...');
-            new Notice('Finding connections...');
+            new Notice('Finding connections...', 3000);
 
             const currentContent = await this.app.vault.read(currentFile);
-            console.log('Current note content length:', currentContent.length);
+            const allFiles = this.app.vault.getMarkdownFiles();
             
-            const ONE_DAY = 24 * 60 * 60 * 1000;
-            if (Date.now() - this.settings.lastIndexed > ONE_DAY) {
-                console.log('Index is stale, reindexing...');
-                await this.indexVault();
+            // Get potential connections by looking at all markdown files
+            const potentialConnections = allFiles
+                .filter(file => file.path !== currentFile.path && !this.isFileExcluded(file))
+                .map(file => `[[${file.basename}]]`);
+
+            // Validate connections
+            const validatedConnections = await this.validateAndFilterConnections(potentialConnections, currentContent);
+
+            if (validatedConnections.length > 0) {
+                const editor = this.app.workspace.activeEditor?.editor;
+                if (editor) {
+                    const cursor = editor.getCursor();
+                    const line = editor.getLine(cursor.line);
+                    
+                    // Add connections as a list at cursor
+                    const connectionsList = validatedConnections
+                        .map(link => `- ${link}`)
+                        .join('\n');
+                    
+                    editor.replaceRange(
+                        `\n\n### Related Notes\n${connectionsList}\n`,
+                        cursor
+                    );
+                    
+                    new Notice(`Added ${validatedConnections.length} connections`);
+                }
+            } else {
+                new Notice('No meaningful connections found');
             }
 
-            console.log('Analyzing current note...');
-            const analysisResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${this.settings.apiKey}`,
-                    'Content-Type': 'application/json',
+        } catch (error) {
+            console.error('Error finding connections:', error);
+            new Notice(`Error: ${error.message || 'Unknown error occurred. Check console for details.'}`, 5000);
+        }
+    }
+
+    private async checkTitlesRelevance(currentTitle: string, otherTitles: string[]): Promise<boolean[]> {
+        try {
+            // Create a numbered list of titles for comparison
+            const titlesList = otherTitles.map((title, i) => `${i + 1}. "${title}"`).join('\n');
+            
+            const result = await this.makeOpenAIRequest([
+                {
+                    role: "system",
+                    content: `You are pre-filtering notes based on their titles to determine if they might be related.
+Your task is to compare the reference title against a list of other titles.
+Return ONLY a JSON array of boolean values, one for each title in the list.
+
+Return true for titles that:
+1. Share similar topics or concepts
+2. Are part of the same series
+3. Use similar terminology
+4. One might provide context for the other
+5. Have similar structural patterns (e.g. both about calculations, rules, or methods)
+
+Return false for titles that:
+- Are completely different topics
+- One is technical/meta and other is content
+- Have no conceptual overlap
+- Are clearly unrelated domains
+
+Example response format: [true, false, true]
+
+Example "true" pairs:
+- "Investment Strategy" & "Portfolio Allocation"
+- "Rule of 72" & "Compound Interest Formula"
+- "Meeting Notes 2024" & "Meeting Action Items"
+- "Financial Terms" & "Investment Glossary"
+
+Example "false" pairs:
+- "Investment Strategy" & "Plugin Settings"
+- "Meeting Notes" & "CSS Styles"
+- "Rule of 72" & "Keyboard Shortcuts"
+- "Financial Terms" & "System Requirements"`
                 },
-                body: JSON.stringify({
-                    model: "gpt-3.5-turbo",
-                    messages: [
-                        {
-                            role: "system",
-                            content: `You are analyzing a note to extract its key elements for finding connections.
-Focus on the specific meaning and context, not just keywords or numbers.
+                {
+                    role: "user",
+                    content: `Reference Title: "${currentTitle}"
 
-Extract:
-1. Specific concepts or rules being discussed
-2. Specific calculations or methods explained
-3. Specific sources or references cited
-4. Specific series or sequence information
-5. Key facts with their exact context`
-                        },
-                        {
-                            role: "user",
-                            content: `Analyze this note and extract its key elements:
+Compare against these titles:
+${titlesList}
 
+Return a JSON array of booleans indicating which titles might be related to the reference title.`
+                }
+            ]);
+            
+            // Parse the response as a JSON array
+            const text = result.choices[0].message.content.trim();
+            try {
+                const boolArray = JSON.parse(text);
+                if (Array.isArray(boolArray) && boolArray.length === otherTitles.length) {
+                    return boolArray;
+                }
+            } catch (e) {
+                console.error('Failed to parse title check response:', text);
+            }
+            
+            // If parsing fails, assume all might be related
+            return otherTitles.map(() => true);
+
+        } catch (error) {
+            // If anything goes wrong, assume they might be related
+            console.error('Error in title check:', error);
+            return otherTitles.map(() => true);
+        }
+    }
+
+    private async validateConnection(currentContent: string, otherContent: string): Promise<boolean> {
+        try {
+            // Adjust the system prompt based on connection strength
+            let systemPrompt = `You are validating if two notes have a meaningful connection.
+A valid connection should share related concepts, ideas, or purpose.
+
+Return ONLY "true" or "false".`;
+
+            // Add strength-specific criteria
+            switch (this.settings.connectionStrength) {
+                case 'strict':
+                    systemPrompt += `
+Return "true" ONLY if the notes:
+1. Share VERY closely related concepts or topics
+2. Are clearly part of the same project or workflow
+3. Have direct references to each other's topics
+4. Would be frequently used together
+5. Form a clear logical sequence
+
+Return "false" if:
+- They only share general themes
+- The connection is indirect
+- They are only loosely related
+- The overlap is minimal
+- You have any doubt about the connection`;
+                    break;
+
+                case 'balanced':
+                    systemPrompt += `
+Return "true" if the notes:
+1. Discuss related concepts
+2. Share similar practical advice or methods
+3. Build on similar principles or rules
+4. Reference related sources or ideas
+5. Would provide valuable context for each other
+
+Return "false" if:
+- They only share superficial similarities
+- They only contain similar numbers without context
+- They only have matching tags
+- The connection is extremely vague
+- They are completely different topics`;
+                    break;
+
+                case 'relaxed':
+                    systemPrompt += `
+Return "true" if the notes:
+1. Share any related concepts or ideas
+2. Could be part of a broader theme
+3. Might provide useful context
+4. Have overlapping subject areas
+5. Could be interesting to cross-reference
+
+Return "false" only if:
+- They are completely unrelated
+- They have no conceptual overlap
+- They serve entirely different purposes
+- The potential connection is meaningless`;
+                    break;
+            }
+
+            const result = await this.makeOpenAIRequest([
+                {
+                    role: "system",
+                    content: systemPrompt
+                },
+                {
+                    role: "user",
+                    content: `Note 1:
 ${currentContent}
 
-Provide the analysis in this format:
-1. Main concepts/rules:
-2. Calculations/methods:
-3. Sources/references:
-4. Series/sequence info:
-5. Key facts with context:`
-                        }
-                    ]
-                })
-            });
+Note 2:
+${otherContent}
 
-            if (!analysisResponse.ok) {
-                throw new Error(`OpenAI API error (${analysisResponse.status}): ${analysisResponse.statusText}`);
-            }
-
-            const analysisResult = await analysisResponse.json();
-            const noteAnalysis = analysisResult.choices[0].message.content;
-            console.log('Note analysis:', noteAnalysis);
-
-            const indexedNotes = Object.entries(this.settings.vaultIndex)
-                .filter(([path]) => path !== currentFile.path);
-            
-            console.log('Number of indexed notes to process:', indexedNotes.length);
-
-            const CHUNK_SIZE = 10;
-            let allConnections: string[] = [];
-
-            for (let i = 0; i < indexedNotes.length; i += CHUNK_SIZE) {
-                const chunk = indexedNotes.slice(i, i + CHUNK_SIZE);
-                console.log(`Processing chunk ${i/CHUNK_SIZE + 1}/${Math.ceil(indexedNotes.length/CHUNK_SIZE)}`);
-                
-                const response = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${this.settings.apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        model: "gpt-3.5-turbo",
-                        messages: [
-                            {
-                                role: "system",
-                                content: `You are finding STRONG, DIRECT connections between notes. A connection must be based on shared meaning and context, not superficial similarities.
-
-VALID connection examples:
-- Both notes explain the exact same financial calculation
-- Both notes reference and discuss the same specific investment strategy
-- One note directly cites or references the other
-- Both notes are explicitly part of the same series or concept
-- Both notes analyze the same specific data or study
-
-DO NOT make connections based on:
-- Presence of numbers without matching context
-- Similar formatting or structure
-- Matching tags or categories
-- Both having percentages or calculations
-- Both mentioning time periods
-- Both containing measurements
-- Both having version numbers or IDs
-- Both using similar units (dollars, years, etc.)
-
-NUMBERS ALONE ARE NOT ENOUGH - the context and meaning must be identical.
-
-For example:
-"Save $100/month" should NOT connect to "Version 1.0.0" just because both contain numbers.
-"8% interest rate" should NOT connect to "80% test coverage" just because both use percentages.
-"$500 investment" should NOT connect to "$500 phone bill" even though the amount matches.
-
-Rate each potential connection from 0-100% based on shared meaning and context.
-Only include connections rated 95% or higher - be EXTREMELY selective.
-
-IMPORTANT: Return ONLY a comma-separated list of relevant note links in double brackets, with no additional text or explanations. Example:
-[[note1]], [[note2]], [[note3]]
-
-If no connections meet the 95% threshold, return an empty string.`
-                            },
-                            {
-                                role: "user",
-                                content: `Find STRONG, DIRECT connections between the analyzed note and these vault notes.
-Only return connections that are extremely specific and meet the 95% threshold.
-
-Current note analysis:
-${noteAnalysis}
-
-Vault notes to check (only include those with >95% relevance):
-${chunk.map(([path, concepts]) => `File: ${path}\nConcepts: ${concepts}\n---`).join('\n')}`
-                            }
-                        ]
-                    })
-                });
-
-                if (!response.ok) {
-                    const errorBody = await response.text();
-                    console.error('OpenAI API Error:', {
-                        status: response.status,
-                        statusText: response.statusText,
-                        body: errorBody
-                    });
-
-                    if (response.status === 429) {
-                        throw new Error('Rate limit exceeded. Please wait a moment before trying again.');
-                    } else if (response.status === 401) {
-                        throw new Error('Invalid API key. Please check your settings.');
-                    } else {
-                        throw new Error(`OpenAI API error (${response.status}): ${response.statusText}`);
-                    }
+Are these notes meaningfully connected? Reply only with "true" or "false".`
                 }
-
-                const result = await response.json();
-                const connections = result.choices[0].message.content.trim();
-                console.log('Raw connections found in chunk:', connections);
-                
-                if (connections && connections.includes('[[')) {
-                    const links = connections.split(',').map((s: string) => s.trim());
-                    const cleanedLinks = this.cleanupLinks(links);
-                    allConnections.push(...cleanedLinks);
-                }
-
-                await new Promise(resolve => setTimeout(resolve, 200));
-            }
-
-            console.log('Initial connections found:', allConnections);
+            ]);
             
-            // Validate and filter connections
-            const validatedConnections = await this.validateAndFilterConnections(allConnections, currentContent);
-            console.log('Validated connections:', validatedConnections);
+            return result.choices[0].message.content.trim().toLowerCase() === 'true';
 
-            // Remove duplicates and sort
-            const uniqueConnections = [...new Set(validatedConnections)].sort().join(', ');
-            const finalOutput = uniqueConnections ? `#### Related Notes\n${uniqueConnections}` : '';
-
-            console.log('Final output:', finalOutput);
-
-            if (!finalOutput) {
-                console.log('No valid connections found');
-                new Notice('No relevant connections found');
-                return;
-            }
-
-            const editor = this.app.workspace.getActiveViewOfType(MarkdownView)?.editor;
-            if (!editor) {
-                throw new Error('No active editor found');
-            }
-
-            const currentPosition = editor.getCursor();
-            const endPosition = { line: editor.lineCount(), ch: 0 };
-            
-            const lastLine = editor.getLine(editor.lineCount() - 1);
-            const separator = lastLine && lastLine.trim() ? '\n\n' : '';
-            
-            editor.replaceRange(
-                `${separator}${finalOutput}`,
-                endPosition
-            );
-
-            editor.setCursor(currentPosition);
-
-            new Notice('Successfully added connections!');
-            
         } catch (error) {
-            console.error('Error generating backlinks:', error);
-            new Notice(`Error: ${error.message || 'Unknown error occurred. Check console for details.'}`);
+            console.error('Error validating connection:', error);
+            return false;
+        }
+    }
+
+    private async validateAndFilterConnections(connections: string[], currentContent: string): Promise<string[]> {
+        const validConnections: string[] = [];
+        const progressNotice = new Notice('Checking connections...', 0);
+        let processed = 0;
+        
+        // Get current file title
+        const currentFile = this.app.workspace.getActiveFile();
+        if (!currentFile) return [];
+        const currentTitle = currentFile.basename;
+        
+        // Extract all filenames first and filter excluded folders
+        const fileInfos = connections
+            .map(link => {
+                const match = link.match(/\[\[(.*?)\]\]/);
+                return match ? { link, filename: match[1] } : null;
+            })
+            .filter((info): info is NonNullable<typeof info> => info !== null)
+            .filter(info => {
+                const file = this.app.vault.getAbstractFileByPath(`${info.filename}.md`);
+                return file instanceof TFile && !this.isFileExcluded(file);
+            });
+        
+        // Process titles in smaller chunks
+        const CHUNK_SIZE = 5; // Reduced from 10 to 5
+        for (let i = 0; i < fileInfos.length; i += CHUNK_SIZE) {
+            const chunk = fileInfos.slice(i, i + CHUNK_SIZE);
+            const titles = chunk.map(info => info.filename);
+            
+            progressNotice.setMessage(`Quick check: ${i + 1}-${Math.min(i + CHUNK_SIZE, fileInfos.length)}/${fileInfos.length}`);
+            const relevanceResults = await this.checkTitlesRelevance(currentTitle, titles);
+            
+            // Process each result in the chunk
+            for (let j = 0; j < chunk.length; j++) {
+                const { link, filename } = chunk[j];
+                if (!relevanceResults[j]) {
+                    console.log(`Skipping ${filename} based on title check`);
+                    processed++;
+                    progressNotice.setMessage(`Checking connections (${processed}/${connections.length})...`);
+                    continue;
+                }
+                
+                // Find the actual file in the vault
+                const file = this.app.vault.getAbstractFileByPath(`${filename}.md`);
+                if (!file || !(file instanceof TFile)) continue;
+                
+                try {
+                    // Read the content of the potential connection
+                    const content = await this.app.vault.read(file as TFile);
+                    
+                    // Validate connection
+                    const isValid = await this.validateConnection(currentContent, content);
+                    
+                    processed++;
+                    progressNotice.setMessage(`Checking connections (${processed}/${connections.length})...`);
+                    
+                    if (isValid) {
+                        console.log(`Validated connection: ${filename}`);
+                        validConnections.push(link);
+                    } else {
+                        console.log(`Rejected connection: ${filename}`);
+                    }
+                    
+                } catch (error) {
+                    console.error(`Error validating connection ${filename}:`, error);
+                    continue;
+                }
+            }
+            
+            // Add extra wait between chunks
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
+        progressNotice.hide();
+        return validConnections;
+    }
+
+    private isFileExcluded(file: TFile): boolean {
+        return this.settings.excludedFolders.some(folder => 
+            file.path.startsWith(folder + '/') || file.path === folder
+        );
+    }
+
+    private addExcludedFolder(folder: string) {
+        if (!this.settings.excludedFolders.includes(folder)) {
+            this.settings.excludedFolders.push(folder);
+            this.saveSettings();
+        }
+    }
+
+    private removeExcludedFolder(folder: string) {
+        const index = this.settings.excludedFolders.indexOf(folder);
+        if (index > -1) {
+            this.settings.excludedFolders.splice(index, 1);
+            this.saveSettings();
+        }
+    }
+}
+
+class FolderSuggestModal extends SuggestModal<TFolder> {
+    textInput: TextAreaComponent;
+    plugin: AutoBacklinksPlugin;
+
+    constructor(app: App, textInput: TextAreaComponent, plugin: AutoBacklinksPlugin) {
+        super(app);
+        this.textInput = textInput;
+        this.plugin = plugin;
+    }
+
+    getSuggestions(query: string): TFolder[] {
+        const files = this.app.vault.getAllLoadedFiles();
+        const folders = files.filter((file): file is TFolder => file instanceof TFolder);
+        return folders.filter(folder => 
+            folder.path.toLowerCase().includes(query.toLowerCase())
+        );
+    }
+
+    renderSuggestion(folder: TFolder, el: HTMLElement) {
+        el.createEl("div", { text: folder.path });
+    }
+
+    onChooseSuggestion(folder: TFolder, evt: MouseEvent | KeyboardEvent) {
+        const currentValue = this.textInput.getValue();
+        const lines = currentValue.split('\n');
+        const newPath = folder.path;
+        
+        // Don't add if already in list
+        if (!lines.includes(newPath)) {
+            if (currentValue && !currentValue.endsWith('\n')) {
+                this.textInput.setValue(currentValue + '\n' + newPath);
+            } else {
+                this.textInput.setValue(currentValue + newPath);
+            }
+            
+            // Save the settings
+            this.plugin.settings.excludedFolders = this.textInput.getValue().split('\n')
+                .map(folder => folder.trim())
+                .filter(folder => folder.length > 0);
+            this.plugin.saveSettings();
         }
     }
 }
 
 class AutoBacklinksSettingTab extends PluginSettingTab {
     plugin: AutoBacklinksPlugin;
-    showApiKey: boolean = false;
-
+    
     constructor(app: App, plugin: AutoBacklinksPlugin) {
         super(app, plugin);
         this.plugin = plugin;
     }
-
+    
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
 
-        // Add reset button at the top
+        // Add section headers
+        containerEl.createEl('h3', { text: 'Model settings' });
+        
+        // Model selection
         new Setting(containerEl)
-            .setName('Reset Settings')
-            .setDesc('Reset all settings to their default values (preserves API key)')
-            .addButton(button => button
-                .setButtonText('Reset to Defaults')
-                .onClick(async () => {
-                    const currentApiKey = this.plugin.settings.apiKey;
-                    this.plugin.settings = Object.assign({}, DEFAULT_SETTINGS, {
-                        apiKey: currentApiKey // Preserve API key
-                    });
+            .setName('Model')
+            .setDesc('Select model for connection discovery')
+            .addDropdown(dropdown => dropdown
+                .addOption('gpt-4', 'GPT-4 (Most accurate)')
+                .addOption('gpt-3.5-turbo', 'GPT-3.5 (Balanced)')
+                .addOption('llama-2-70b', 'Llama 2 (Low cost)')
+                .addOption('llama-local', 'Llama (Local, self-hosted)')
+                .setValue(this.plugin.settings.model)
+                .onChange(async (value: 'gpt-4' | 'gpt-3.5-turbo' | 'llama-2-70b' | 'llama-local') => {
+                    this.plugin.settings.model = value;
                     await this.plugin.saveSettings();
-                    this.display(); // Refresh the display
-                    new Notice('Settings reset to defaults (API key preserved)');
+                    this.updateApiKeyVisibility();
                 }));
 
-        const apiKeySetting = new Setting(containerEl)
-            .setName('OpenAI API Key')
-            .setDesc('Enter your OpenAI API key')
+        // API Keys group
+        const apiKeyGroup = containerEl.createDiv('api-keys');
+        apiKeyGroup.style.marginBottom = '24px';
+        apiKeyGroup.style.marginTop = '12px';
+
+        // OpenAI API key
+        const openaiKeySetting = new Setting(apiKeyGroup)
+            .setClass('openai-key-setting')
+            .setName('OpenAI API key')
             .addText(text => text
-                .setPlaceholder('Enter your API key')
+                .setPlaceholder('Enter API key')
                 .setValue(this.plugin.settings.apiKey)
-                .inputEl.type = this.showApiKey ? 'text' : 'password');
+                .then(input => {
+                    input.inputEl.type = 'password';
+                    input.inputEl.style.width = '240px';
+                }));
 
-        // Add show/hide toggle button
-        apiKeySetting.addButton(button => {
-            button
-                .setIcon(this.showApiKey ? 'eye-off' : 'eye')
-                .setTooltip(this.showApiKey ? 'Hide API Key' : 'Show API Key')
-                .onClick(() => {
-                    this.showApiKey = !this.showApiKey;
-                    const input = apiKeySetting.controlEl.getElementsByTagName('input')[0];
-                    input.type = this.showApiKey ? 'text' : 'password';
-                    button.setIcon(this.showApiKey ? 'eye-off' : 'eye');
-                    button.setTooltip(this.showApiKey ? 'Hide API Key' : 'Show API Key');
+        // Together API key
+        const togetherKeySetting = new Setting(apiKeyGroup)
+            .setClass('together-key-setting')
+            .setName('Together API key')
+            .addText(text => text
+                .setPlaceholder('Enter API key')
+                .setValue(this.plugin.settings.togetherApiKey)
+                .then(input => {
+                    input.inputEl.type = 'password';
+                    input.inputEl.style.width = '240px';
+                }));
+
+        // Local Llama endpoint setting
+        const llamaEndpointSetting = new Setting(containerEl)
+            .setClass('llama-endpoint-setting')
+            .setName('Local Llama endpoint')
+            .setDesc(createFragment(frag => {
+                frag.appendText('URL for your local Llama server. ');
+                frag.createEl('a', {
+                    text: 'Setup instructions',
+                    href: 'https://github.com/ggerganov/llama.cpp/blob/master/examples/server/README.md'
+                }, (a) => {
+                    a.setAttr('target', '_blank');
                 });
-        });
+            }))
+            .addText(text => text
+                .setPlaceholder('http://localhost:8080')
+                .setValue(this.plugin.settings.llamaEndpoint)
+                .then(input => {
+                    input.inputEl.style.width = '240px';
+                }));
 
-        // Add the input change handler
-        const input = apiKeySetting.controlEl.getElementsByTagName('input')[0];
-        input.addEventListener('change', async (e: Event) => {
-            const target = e.target as HTMLInputElement;
-            this.plugin.settings.apiKey = target.value;
+        // Hide endpoint if not using local Llama
+        llamaEndpointSetting.settingEl.style.display = 
+            this.plugin.settings.model === 'llama-local' ? 'block' : 'none';
+
+        // Connection settings header
+        containerEl.createEl('h3', { text: 'Connection settings' });
+
+        // Connection strength
+        new Setting(containerEl)
+            .setName('Connection strength')
+            .setDesc('Threshold for creating connections')
+            .addDropdown(dropdown => dropdown
+                .addOption('strict', 'Strict')
+                .addOption('balanced', 'Balanced')
+                .addOption('relaxed', 'Relaxed')
+                .setValue(this.plugin.settings.connectionStrength)
+                .then(dropdown => {
+                    dropdown.selectEl.style.width = '100px';
+                }));
+
+        // Folder exclusions
+        const folderSetting = new Setting(containerEl)
+            .setName('Excluded folders')
+            .setDesc('Skip these folders when finding connections');
+
+        // Folder buttons in a container
+        const buttonContainer = folderSetting.settingEl.createDiv('folder-buttons');
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.gap = '8px';
+
+        // Create text area container
+        const textAreaContainer = folderSetting.settingEl.createDiv('folder-textarea');
+        textAreaContainer.style.marginTop = '8px';
+        
+        // Create text area component
+        const textAreaComponent = new TextAreaComponent(textAreaContainer);
+        textAreaComponent
+            .setPlaceholder('One folder path per line')
+            .setValue(this.plugin.settings.excludedFolders.join('\n'));
+        
+        textAreaComponent.inputEl.style.width = '100%';
+        textAreaComponent.inputEl.style.height = '80px';
+        
+        textAreaComponent.onChange(async (value) => {
+            this.plugin.settings.excludedFolders = value.split('\n')
+                .map(folder => folder.trim())
+                .filter(folder => folder.length > 0);
             await this.plugin.saveSettings();
         });
 
+        // Add folder button
+        const addButton = new ButtonComponent(buttonContainer)
+            .setButtonText('Add folder')
+            .onClick(() => {
+                new FolderSuggestModal(this.app, textAreaComponent, this.plugin).open();
+            });
+
+        // Clear button
+        const clearButton = new ButtonComponent(buttonContainer)
+            .setButtonText('Clear')
+            .onClick(async () => {
+                textAreaComponent.setValue('');
+                this.plugin.settings.excludedFolders = [];
+                await this.plugin.saveSettings();
+            });
+
+        // Command settings header
+        containerEl.createEl('h3', { text: 'Command settings' });
+
+        // Command name
         new Setting(containerEl)
-            .setName('Command Name')
-            .setDesc('Customize the name of the command that appears in the command palette')
+            .setName('Command name')
             .addText(text => text
-                .setPlaceholder('Weave Connections')
+                .setPlaceholder('Weave connections')
                 .setValue(this.plugin.settings.commandName)
-                .onChange(async (value) => {
-                    this.plugin.settings.commandName = value;
-                    await this.plugin.saveSettings();
-                    // Reload the command with new name
-                    this.plugin.addCommand({
-                        id: 'weave-connections',
-                        name: value,
-                        callback: () => this.plugin.generateBacklinks()
-                    });
+                .then(input => {
+                    input.inputEl.style.width = '200px';
                 }));
 
+        // Prompt
         new Setting(containerEl)
-            .setName('GPT Prompt')
-            .setDesc('Customize the prompt that will be sent to GPT when analyzing notes')
-            .addTextArea(text => text
-                .setPlaceholder('Enter prompt for GPT')
+            .setName('Prompt')
+            .addText(text => text
+                .setPlaceholder('Find connections...')
                 .setValue(this.plugin.settings.slashCommandPrompt)
-                .onChange(async (value) => {
-                    this.plugin.settings.slashCommandPrompt = value;
-                    await this.plugin.saveSettings();
+                .then(input => {
+                    input.inputEl.style.width = '100%';
                 }));
 
+        // Special instructions
         new Setting(containerEl)
-            .setName('Special Instructions')
-            .setDesc('Additional instructions for how the AI should handle connection discovery')
+            .setName('Special instructions')
             .addTextArea(text => text
-                .setPlaceholder('Enter special instructions')
+                .setPlaceholder('Additional instructions for connection discovery')
                 .setValue(this.plugin.settings.specialInstructions)
-                .onChange(async (value) => {
-                    this.plugin.settings.specialInstructions = value;
-                    await this.plugin.saveSettings();
+                .then(input => {
+                    input.inputEl.style.width = '100%';
+                    input.inputEl.style.height = '80px';
                 }));
 
-        new Setting(containerEl)
-            .setName('Relevance Threshold')
-            .setDesc('Minimum relevance score (0-1) required to create a connection')
-            .addSlider(slider => slider
-                .setLimits(0, 1, 0.1)
-                .setValue(this.plugin.settings.relevanceThreshold)
-                .onChange(async (value) => {
-                    this.plugin.settings.relevanceThreshold = value;
-                    await this.plugin.saveSettings();
-                }));
+        // Update API key visibility initially
+        this.updateApiKeyVisibility();
+    }
+
+    private updateApiKeyVisibility() {
+        const openaiKey = document.querySelector('.openai-key-setting');
+        const togetherKey = document.querySelector('.together-key-setting');
+        const llamaEndpoint = document.querySelector('.llama-endpoint-setting');
+        
+        if (openaiKey instanceof HTMLElement && 
+            togetherKey instanceof HTMLElement && 
+            llamaEndpoint instanceof HTMLElement) {
+            const model = MODEL_PRICING[this.plugin.settings.model];
+            openaiKey.style.display = model.provider === 'openai' ? 'block' : 'none';
+            togetherKey.style.display = model.provider === 'together' ? 'block' : 'none';
+            llamaEndpoint.style.display = model.provider === 'local' ? 'block' : 'none';
+        }
     }
 }
