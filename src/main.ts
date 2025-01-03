@@ -3,28 +3,38 @@ import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Set
 interface AutoBacklinksSettings {
     apiKey: string;
     togetherApiKey: string;
+    anthropicKey: string;
     llamaEndpoint: string;
-    commandName: string;
-    slashCommandPrompt: string;
-    specialInstructions: string;
+    ollamaEndpoint: string;
+    model: 'gpt-4' | 'gpt-3.5-turbo' | 'claude-3.5' | 'claude-3' | 'llama-2-70b' | 'llama-local' | 'ollama';
     connectionStrength: 'strict' | 'balanced' | 'relaxed';
-    model: 'gpt-4' | 'gpt-3.5-turbo' | 'llama-2-70b' | 'llama-local';
     excludedFolders: string[];
+    specialInstructions: string;
+    format: 'comma' | 'bullet' | 'number' | 'line';
+    showHeader: boolean;
 }
 
 const DEFAULT_SETTINGS: AutoBacklinksSettings = {
     apiKey: '',
     togetherApiKey: '',
+    anthropicKey: '',
     llamaEndpoint: 'http://localhost:8080',
-    commandName: 'Weave connections',
-    slashCommandPrompt: 'Find meaningful connections between this note and others in the vault.',
-    specialInstructions: '',
+    ollamaEndpoint: 'http://localhost:11434',
+    model: 'gpt-4',
     connectionStrength: 'balanced',
-    model: 'gpt-3.5-turbo',
-    excludedFolders: []
+    excludedFolders: [],
+    specialInstructions: '',
+    format: 'comma',
+    showHeader: true
 }
 
-const MODEL_PRICING = {
+const MODEL_PRICING: Record<string, {
+    name: string;
+    description: string;
+    provider: 'openai' | 'anthropic' | 'together' | 'local';
+    inputPer1k: number;
+    outputPer1k: number;
+}> = {
     'gpt-4': { 
         name: 'GPT-4',
         description: 'Most accurate',
@@ -39,6 +49,20 @@ const MODEL_PRICING = {
         inputPer1k: 0.001, 
         outputPer1k: 0.002 
     },
+    'claude-3.5': {
+        name: 'Claude 3.5',
+        description: 'Latest & most capable',
+        provider: 'anthropic',
+        inputPer1k: 0.015,
+        outputPer1k: 0.075
+    },
+    'claude-3': {
+        name: 'Claude 3',
+        description: 'Balanced performance',
+        provider: 'anthropic',
+        inputPer1k: 0.008,
+        outputPer1k: 0.024
+    },
     'llama-2-70b': { 
         name: 'Llama 2 70B',
         description: 'Low cost',
@@ -48,7 +72,14 @@ const MODEL_PRICING = {
     },
     'llama-local': {
         name: 'Llama (Local)',
-        description: 'Free, self-hosted',
+        description: 'Free, self-hosted, slow',
+        provider: 'local',
+        inputPer1k: 0,
+        outputPer1k: 0
+    },
+    'ollama': {
+        name: 'Ollama (Local)',
+        description: 'Free, self-hosted, easy setup, slow',
         provider: 'local',
         inputPer1k: 0,
         outputPer1k: 0
@@ -124,6 +155,47 @@ export default class AutoBacklinksPlugin extends Plugin {
         }
     }
 
+    private async makeClaudeRequest(messages: any[]): Promise<any> {
+        try {
+            const prompt = messages.map(m => 
+                `${m.role}: ${m.content}`
+            ).join('\n');
+
+            const response = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': this.settings.anthropicKey,
+                    'anthropic-version': '2023-06-01'
+                },
+                body: JSON.stringify({
+                    model: this.settings.model === 'claude-3.5' ? 'claude-3.5-20240229' : 'claude-3-20240229',
+                    max_tokens: 1024,
+                    messages: [{
+                        role: 'user',
+                        content: prompt
+                    }]
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Claude API request failed: ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            return {
+                choices: [{
+                    message: {
+                        content: result.content[0].text
+                    }
+                }]
+            };
+        } catch (error) {
+            console.error('Error making Claude request:', error);
+            throw error;
+        }
+    }
+
     private async makeTogetherRequest(messages: any[]): Promise<any> {
         try {
             const prompt = messages.map(m => 
@@ -168,30 +240,74 @@ export default class AutoBacklinksPlugin extends Plugin {
                 `${m.role}: ${m.content}`
             ).join('\n');
 
-            const response = await fetch(`${this.settings.llamaEndpoint}/completion`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    max_tokens: 100,
-                    temperature: 0.7
-                })
-            });
+            if (this.settings.model === 'ollama') {
+                // Ollama API endpoint
+                const response = await fetch(`${this.settings.ollamaEndpoint}/api/generate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model: 'llama2',
+                        prompt: prompt + "\nRespond with ONLY 'true' or 'false', nothing else.",
+                        stream: false
+                    })
+                });
 
-            if (!response.ok) {
-                throw new Error(`Llama API request failed: ${response.statusText}`);
+                if (!response.ok) {
+                    throw new Error(`Ollama API request failed: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                const responseText = result.response.toLowerCase().trim();
+                
+                // Extract true/false from the response
+                if (responseText.includes('true')) {
+                    return {
+                        choices: [{
+                            message: {
+                                content: 'true'
+                            }
+                        }]
+                    };
+                } else if (responseText.includes('false')) {
+                    return {
+                        choices: [{
+                            message: {
+                                content: 'false'
+                            }
+                        }]
+                    };
+                } else {
+                    throw new Error('Failed to get clear true/false response from Ollama');
+                }
+            } else {
+                // Original Llama endpoint
+                const response = await fetch(`${this.settings.llamaEndpoint}/completion`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        prompt: prompt + "\nRespond with ONLY 'true' or 'false', nothing else.",
+                        max_tokens: 100,
+                        temperature: 0.7
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Llama API request failed: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                return {
+                    choices: [{
+                        message: {
+                            content: result.content
+                        }
+                    }]
+                };
             }
-
-            const result = await response.json();
-            return {
-                choices: [{
-                    message: {
-                        content: result.content
-                    }
-                }]
-            };
         } catch (error) {
             console.error('Error making Llama request:', error);
             throw error;
@@ -206,7 +322,7 @@ export default class AutoBacklinksPlugin extends Plugin {
         // Add slash command
         this.addCommand({
             id: 'weave-connections',
-            name: this.settings.commandName || 'Weave connections',
+            name: 'Weave connections',
             callback: () => {
                 console.log('Executing weave-connections command');
                 try {
@@ -241,8 +357,8 @@ export default class AutoBacklinksPlugin extends Plugin {
     }
 
     async generateBacklinks() {
-        if (!this.settings.apiKey && !this.settings.togetherApiKey) {
-            new Notice('Please set your OpenAI or Together API key in the settings');
+        if (!this.settings.apiKey && !this.settings.togetherApiKey && !this.settings.anthropicKey) {
+            new Notice('Please set your OpenAI, Together, or Anthropic API key in the settings');
             return;
         }
 
@@ -274,12 +390,10 @@ export default class AutoBacklinksPlugin extends Plugin {
                     const line = editor.getLine(cursor.line);
                     
                     // Add connections as a list at cursor
-                    const connectionsList = validatedConnections
-                        .map(link => `- ${link}`)
-                        .join('\n');
-                    
+                    const connectionsList = await this.formatConnections(validatedConnections);
+
                     editor.replaceRange(
-                        `\n\n### Related Notes\n${connectionsList}\n`,
+                        connectionsList,
                         cursor
                     );
                     
@@ -293,6 +407,36 @@ export default class AutoBacklinksPlugin extends Plugin {
             console.error('Error finding connections:', error);
             new Notice(`Error: ${error.message || 'Unknown error occurred. Check console for details.'}`, 5000);
         }
+    }
+
+    private async formatConnections(links: string[]): Promise<string> {
+        if (links.length === 0) {
+            return '';
+        }
+
+        let result = '';
+        
+        // Add header if enabled
+        if (this.settings.showHeader) {
+            result += '### Related notes\n\n';
+        }
+
+        // Format connections
+        switch (this.settings.format) {
+            case 'bullet':
+                result += links.map(link => `- ${link}`).join('\n');
+                break;
+            case 'number':
+                result += links.map((link, i) => `${i + 1}. ${link}`).join('\n');
+                break;
+            case 'line':
+                result += links.join('\n');
+                break;
+            default: // comma
+                result += links.join(', ');
+        }
+
+        return result + '\n';
     }
 
     private async checkTitlesRelevance(currentTitle: string, otherTitles: string[]): Promise<boolean[]> {
@@ -319,6 +463,7 @@ Return false for titles that:
 - One is technical/meta and other is content
 - Have no conceptual overlap
 - Are clearly unrelated domains
+- The potential connection is meaningless
 
 Example response format: [true, false, true]
 
@@ -372,7 +517,7 @@ Return a JSON array of booleans indicating which titles might be related to the 
             let systemPrompt = `You are validating if two notes have a meaningful connection.
 A valid connection should share related concepts, ideas, or purpose.
 
-Return ONLY "true" or "false".`;
+${this.settings.specialInstructions ? this.settings.specialInstructions + "\n\n" : ""}Return ONLY "true" or "false".`;
 
             // Add strength-specific criteria
             switch (this.settings.connectionStrength) {
@@ -427,22 +572,81 @@ Return "false" only if:
                     break;
             }
 
-            const result = await this.makeOpenAIRequest([
-                {
-                    role: "system",
-                    content: systemPrompt
-                },
-                {
-                    role: "user",
-                    content: `Note 1:
+            let result;
+            switch (MODEL_PRICING[this.settings.model].provider) {
+                case 'openai':
+                    result = await this.makeOpenAIRequest([
+                        {
+                            role: "system",
+                            content: systemPrompt
+                        },
+                        {
+                            role: "user",
+                            content: `Note 1:
 ${currentContent}
 
 Note 2:
 ${otherContent}
 
 Are these notes meaningfully connected? Reply only with "true" or "false".`
-                }
-            ]);
+                        }
+                    ]);
+                    break;
+                case 'anthropic':
+                    result = await this.makeClaudeRequest([
+                        {
+                            role: "system",
+                            content: systemPrompt
+                        },
+                        {
+                            role: "user",
+                            content: `Note 1:
+${currentContent}
+
+Note 2:
+${otherContent}
+
+Are these notes meaningfully connected? Reply only with "true" or "false".`
+                        }
+                    ]);
+                    break;
+                case 'together':
+                    result = await this.makeTogetherRequest([
+                        {
+                            role: "system",
+                            content: systemPrompt
+                        },
+                        {
+                            role: "user",
+                            content: `Note 1:
+${currentContent}
+
+Note 2:
+${otherContent}
+
+Are these notes meaningfully connected? Reply only with "true" or "false".`
+                        }
+                    ]);
+                    break;
+                case 'local':
+                    result = await this.makeLlamaRequest([
+                        {
+                            role: "system",
+                            content: systemPrompt
+                        },
+                        {
+                            role: "user",
+                            content: `Note 1:
+${currentContent}
+
+Note 2:
+${otherContent}
+
+Are these notes meaningfully connected? Reply only with "true" or "false".`
+                        }
+                    ]);
+                    break;
+            }
             
             return result.choices[0].message.content.trim().toLowerCase() === 'true';
 
@@ -607,19 +811,26 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
         containerEl.empty();
 
         // Add section headers
-        containerEl.createEl('h3', { text: 'Model settings' });
+        const modelHeader = containerEl.createEl('h3', { text: 'Model settings' });
+        modelHeader.style.marginBottom = '24px';
         
         // Model selection
-        new Setting(containerEl)
+        const modelSetting = new Setting(containerEl)
             .setName('Model')
             .setDesc('Select model for connection discovery')
             .addDropdown(dropdown => dropdown
                 .addOption('gpt-4', 'GPT-4 (Most accurate)')
                 .addOption('gpt-3.5-turbo', 'GPT-3.5 (Balanced)')
+                .addOption('claude-3.5', 'Claude 3.5 (Latest & most capable)')
+                .addOption('claude-3', 'Claude 3 (Balanced performance)')
                 .addOption('llama-2-70b', 'Llama 2 (Low cost)')
                 .addOption('llama-local', 'Llama (Local, self-hosted)')
+                .addOption('ollama', 'Ollama (Local, easy setup)')
                 .setValue(this.plugin.settings.model)
-                .onChange(async (value: 'gpt-4' | 'gpt-3.5-turbo' | 'llama-2-70b' | 'llama-local') => {
+                .then(dropdown => {
+                    dropdown.selectEl.style.width = '240px';
+                })
+                .onChange(async (value: 'gpt-4' | 'gpt-3.5-turbo' | 'claude-3.5' | 'claude-3' | 'llama-2-70b' | 'llama-local' | 'ollama') => {
                     this.plugin.settings.model = value;
                     await this.plugin.saveSettings();
                     this.updateApiKeyVisibility();
@@ -628,34 +839,74 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
         // API Keys group
         const apiKeyGroup = containerEl.createDiv('api-keys');
         apiKeyGroup.style.marginBottom = '24px';
-        apiKeyGroup.style.marginTop = '12px';
 
         // OpenAI API key
         const openaiKeySetting = new Setting(apiKeyGroup)
             .setClass('openai-key-setting')
-            .setName('OpenAI API key')
-            .addText(text => text
-                .setPlaceholder('Enter API key')
-                .setValue(this.plugin.settings.apiKey)
-                .then(input => {
-                    input.inputEl.type = 'password';
-                    input.inputEl.style.width = '240px';
-                }));
+            .setName('OpenAI API key');
+        openaiKeySetting.settingEl.style.alignItems = 'center';
+        openaiKeySetting.addText(text => text
+            .setPlaceholder('Enter API key')
+            .setValue(this.plugin.settings.apiKey)
+            .then(input => {
+                input.inputEl.type = 'password';
+                input.inputEl.style.width = '240px';
+            }));
 
         // Together API key
         const togetherKeySetting = new Setting(apiKeyGroup)
             .setClass('together-key-setting')
             .setName('Together API key')
-            .addText(text => text
-                .setPlaceholder('Enter API key')
-                .setValue(this.plugin.settings.togetherApiKey)
-                .then(input => {
-                    input.inputEl.type = 'password';
-                    input.inputEl.style.width = '240px';
-                }));
+            .setDesc(createFragment(frag => {
+                frag.appendText('Required for Llama 2 70B. ');
+                frag.createEl('a', {
+                    text: 'Get API key',
+                    href: 'https://www.together.ai/'
+                }, (a) => {
+                    a.setAttr('target', '_blank');
+                });
+            }));
+        togetherKeySetting.settingEl.style.alignItems = 'center';
+        togetherKeySetting.addText(text => text
+            .setPlaceholder('Enter API key')
+            .setValue(this.plugin.settings.togetherApiKey)
+            .then(input => {
+                input.inputEl.type = 'password';
+                input.inputEl.style.width = '240px';
+            })
+            .onChange(async (value) => {
+                this.plugin.settings.togetherApiKey = value;
+                await this.plugin.saveSettings();
+            }));
+
+        // Anthropic API key
+        const anthropicKeySetting = new Setting(apiKeyGroup)
+            .setClass('anthropic-key-setting')
+            .setName('Anthropic API key')
+            .setDesc(createFragment(frag => {
+                frag.appendText('Required for Claude models. ');
+                frag.createEl('a', {
+                    text: 'Get API key',
+                    href: 'https://console.anthropic.com/account/keys'
+                }, (a) => {
+                    a.setAttr('target', '_blank');
+                });
+            }));
+        anthropicKeySetting.settingEl.style.alignItems = 'center';
+        anthropicKeySetting.addText(text => text
+            .setPlaceholder('Enter API key')
+            .setValue(this.plugin.settings.anthropicKey)
+            .then(input => {
+                input.inputEl.type = 'password';
+                input.inputEl.style.width = '240px';
+            })
+            .onChange(async (value) => {
+                this.plugin.settings.anthropicKey = value;
+                await this.plugin.saveSettings();
+            }));
 
         // Local Llama endpoint setting
-        const llamaEndpointSetting = new Setting(containerEl)
+        const llamaEndpointSetting = new Setting(apiKeyGroup)
             .setClass('llama-endpoint-setting')
             .setName('Local Llama endpoint')
             .setDesc(createFragment(frag => {
@@ -666,32 +917,111 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
                 }, (a) => {
                     a.setAttr('target', '_blank');
                 });
-            }))
-            .addText(text => text
-                .setPlaceholder('http://localhost:8080')
-                .setValue(this.plugin.settings.llamaEndpoint)
-                .then(input => {
-                    input.inputEl.style.width = '240px';
-                }));
+            }));
+        llamaEndpointSetting.settingEl.style.alignItems = 'center';
+        llamaEndpointSetting.addText(text => text
+            .setPlaceholder('http://localhost:8080')
+            .setValue(this.plugin.settings.llamaEndpoint)
+            .then(input => {
+                input.inputEl.style.width = '240px';
+            }));
 
-        // Hide endpoint if not using local Llama
+        // Ollama endpoint setting
+        const ollamaEndpointSetting = new Setting(apiKeyGroup)
+            .setClass('ollama-endpoint-setting')
+            .setName('Ollama endpoint')
+            .setDesc(createFragment(frag => {
+                frag.appendText('URL for your Ollama server. ');
+                frag.createEl('a', {
+                    text: 'Install Ollama',
+                    href: 'https://ollama.com/'
+                }, (a) => {
+                    a.setAttr('target', '_blank');
+                });
+            }));
+        ollamaEndpointSetting.settingEl.style.alignItems = 'center';
+        ollamaEndpointSetting.addText(text => text
+            .setPlaceholder('http://localhost:11434')
+            .setValue(this.plugin.settings.ollamaEndpoint)
+            .then(input => {
+                input.inputEl.style.width = '240px';
+            }));
+
+        // Hide endpoint if not using local Llama or Ollama
         llamaEndpointSetting.settingEl.style.display = 
             this.plugin.settings.model === 'llama-local' ? 'block' : 'none';
+        ollamaEndpointSetting.settingEl.style.display = 
+            this.plugin.settings.model === 'ollama' ? 'block' : 'none';
 
         // Connection settings header
-        containerEl.createEl('h3', { text: 'Connection settings' });
+        const connectionHeader = containerEl.createEl('h3', { text: 'Connection settings' });
+        connectionHeader.style.marginBottom = '24px';
 
         // Connection strength
-        new Setting(containerEl)
+        const strengthSetting = new Setting(containerEl)
             .setName('Connection strength')
-            .setDesc('Threshold for creating connections')
+            .setDesc('How closely related notes need to be')
             .addDropdown(dropdown => dropdown
                 .addOption('strict', 'Strict')
                 .addOption('balanced', 'Balanced')
                 .addOption('relaxed', 'Relaxed')
                 .setValue(this.plugin.settings.connectionStrength)
                 .then(dropdown => {
-                    dropdown.selectEl.style.width = '100px';
+                    dropdown.selectEl.style.width = '240px';
+                })
+                .onChange(async (value: 'strict' | 'balanced' | 'relaxed') => {
+                    this.plugin.settings.connectionStrength = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Backlink settings header
+        const commandHeader = containerEl.createEl('h3', { text: 'Backlink settings' });
+        commandHeader.style.marginBottom = '24px';
+        commandHeader.style.marginTop = '48px';
+
+        // Show header
+        const showHeaderSetting = new Setting(containerEl)
+            .setName('Show section header')
+            .setDesc('Add "Related notes" header above backlinks')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showHeader)
+                .onChange(async (value) => {
+                    this.plugin.settings.showHeader = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Format selection
+        const formatSetting = new Setting(containerEl)
+            .setName('Backlink format')
+            .setDesc('Choose how to display backlinks in your notes')
+            .addDropdown(dropdown => dropdown
+                .addOption('comma', 'Comma list')
+                .addOption('bullet', 'Bulleted list')
+                .addOption('number', 'Numbered list')
+                .addOption('line', 'One per line')
+                .setValue(this.plugin.settings.format)
+                .then(dropdown => {
+                    dropdown.selectEl.style.width = '240px';
+                })
+                .onChange(async (value: 'comma' | 'bullet' | 'number' | 'line') => {
+                    this.plugin.settings.format = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Special instructions
+        const specialInstructionsSetting = new Setting(containerEl)
+            .setName('Special instructions')
+            .setDesc('Additional criteria for finding or formatting related notes')
+            .addTextArea(text => text
+                .setPlaceholder('Enter special instructions')
+                .setValue(this.plugin.settings.specialInstructions)
+                .then(input => {
+                    input.inputEl.style.width = '240px';
+                    input.inputEl.style.height = '96px';
+                })
+                .onChange(async (value) => {
+                    this.plugin.settings.specialInstructions = value;
+                    await this.plugin.saveSettings();
                 }));
 
         // Folder exclusions
@@ -699,23 +1029,19 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
             .setName('Excluded folders')
             .setDesc('Skip these folders when finding connections');
 
-        // Folder buttons in a container
-        const buttonContainer = folderSetting.settingEl.createDiv('folder-buttons');
-        buttonContainer.style.display = 'flex';
-        buttonContainer.style.gap = '8px';
+        const folderContainer = folderSetting.settingEl.createDiv('folder-container');
+        folderContainer.style.display = 'flex';
+        folderContainer.style.flexDirection = 'column';
+        folderContainer.style.gap = '12px';
 
-        // Create text area container
-        const textAreaContainer = folderSetting.settingEl.createDiv('folder-textarea');
-        textAreaContainer.style.marginTop = '8px';
-        
         // Create text area component
-        const textAreaComponent = new TextAreaComponent(textAreaContainer);
+        const textAreaComponent = new TextAreaComponent(folderContainer);
         textAreaComponent
             .setPlaceholder('One folder path per line')
             .setValue(this.plugin.settings.excludedFolders.join('\n'));
         
-        textAreaComponent.inputEl.style.width = '100%';
-        textAreaComponent.inputEl.style.height = '80px';
+        textAreaComponent.inputEl.style.width = '240px';
+        textAreaComponent.inputEl.style.height = '96px';
         
         textAreaComponent.onChange(async (value) => {
             this.plugin.settings.excludedFolders = value.split('\n')
@@ -724,15 +1050,20 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
         });
 
+        // Button row below textarea
+        const buttonRow = folderContainer.createDiv('button-row');
+        buttonRow.style.display = 'flex';
+        buttonRow.style.gap = '8px';
+
         // Add folder button
-        const addButton = new ButtonComponent(buttonContainer)
+        const addButton = new ButtonComponent(buttonRow)
             .setButtonText('Add folder')
             .onClick(() => {
                 new FolderSuggestModal(this.app, textAreaComponent, this.plugin).open();
             });
 
         // Clear button
-        const clearButton = new ButtonComponent(buttonContainer)
+        const clearButton = new ButtonComponent(buttonRow)
             .setButtonText('Clear')
             .onClick(async () => {
                 textAreaComponent.setValue('');
@@ -740,56 +1071,36 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
                 await this.plugin.saveSettings();
             });
 
-        // Command settings header
-        containerEl.createEl('h3', { text: 'Command settings' });
-
-        // Command name
-        new Setting(containerEl)
-            .setName('Command name')
-            .addText(text => text
-                .setPlaceholder('Weave connections')
-                .setValue(this.plugin.settings.commandName)
-                .then(input => {
-                    input.inputEl.style.width = '200px';
-                }));
-
-        // Prompt
-        new Setting(containerEl)
-            .setName('Prompt')
-            .addText(text => text
-                .setPlaceholder('Find connections...')
-                .setValue(this.plugin.settings.slashCommandPrompt)
-                .then(input => {
-                    input.inputEl.style.width = '100%';
-                }));
-
-        // Special instructions
-        new Setting(containerEl)
-            .setName('Special instructions')
-            .addTextArea(text => text
-                .setPlaceholder('Additional instructions for connection discovery')
-                .setValue(this.plugin.settings.specialInstructions)
-                .then(input => {
-                    input.inputEl.style.width = '100%';
-                    input.inputEl.style.height = '80px';
-                }));
-
         // Update API key visibility initially
         this.updateApiKeyVisibility();
     }
 
     private updateApiKeyVisibility() {
-        const openaiKey = document.querySelector('.openai-key-setting');
-        const togetherKey = document.querySelector('.together-key-setting');
-        const llamaEndpoint = document.querySelector('.llama-endpoint-setting');
-        
-        if (openaiKey instanceof HTMLElement && 
-            togetherKey instanceof HTMLElement && 
-            llamaEndpoint instanceof HTMLElement) {
-            const model = MODEL_PRICING[this.plugin.settings.model];
-            openaiKey.style.display = model.provider === 'openai' ? 'block' : 'none';
-            togetherKey.style.display = model.provider === 'together' ? 'block' : 'none';
-            llamaEndpoint.style.display = model.provider === 'local' ? 'block' : 'none';
+        const openaiKeyEl = document.querySelector('.openai-key-setting') as HTMLElement;
+        const anthropicKeyEl = document.querySelector('.anthropic-key-setting') as HTMLElement;
+        const togetherKeyEl = document.querySelector('.together-key-setting') as HTMLElement;
+        const llamaEndpointEl = document.querySelector('.llama-endpoint-setting') as HTMLElement;
+        const ollamaEndpointEl = document.querySelector('.ollama-endpoint-setting') as HTMLElement;
+
+        if (openaiKeyEl) {
+            openaiKeyEl.style.display = 
+                ['gpt-4', 'gpt-3.5-turbo'].includes(this.plugin.settings.model) ? 'block' : 'none';
+        }
+        if (anthropicKeyEl) {
+            anthropicKeyEl.style.display = 
+                ['claude-3.5', 'claude-3'].includes(this.plugin.settings.model) ? 'block' : 'none';
+        }
+        if (togetherKeyEl) {
+            togetherKeyEl.style.display = 
+                this.plugin.settings.model === 'llama-2-70b' ? 'block' : 'none';
+        }
+        if (llamaEndpointEl) {
+            llamaEndpointEl.style.display = 
+                this.plugin.settings.model === 'llama-local' ? 'block' : 'none';
+        }
+        if (ollamaEndpointEl) {
+            ollamaEndpointEl.style.display = 
+                this.plugin.settings.model === 'ollama' ? 'block' : 'none';
         }
     }
 }
