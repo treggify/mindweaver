@@ -1,52 +1,69 @@
-# MindWeaver for Obsidian
+# MindWeaver
 
-MindWeaver is an intelligent Obsidian plugin that uses GPT to automatically discover and weave meaningful connections across your knowledge base.
+MindWeaver is an Obsidian plugin that uses AI to automatically discover and create meaningful backlinks between your notes. It analyzes your notes' content and suggests connections that you might have missed, helping you build a more interconnected knowledge base.
 
 ## Features
 
-- **Intelligent Connection Discovery**: Uses GPT to analyze your notes and create meaningful connections
-- **Customizable Settings**: Configure API key, special instructions, and relevance threshold
-- **Easy to Use**: Invoke with slash command `/weave-connections` or customizable hotkey
+- **AI-Powered Connection Discovery**: Automatically finds meaningful relationships between your notes using advanced language models
+- **Multiple Model Options**: Choose from various AI models to balance cost, speed, and accuracy:
+  - OpenAI: GPT-4 (Most accurate) or GPT-3.5 (Balanced)
+  - Anthropic: Claude 3.5 (Latest & most capable) or Claude 3 (Balanced performance)
+  - Together.ai: Llama 2 70B (Low cost)
+  - Self-hosted: Llama (Local) or Ollama (Local, easy setup)
+- **Flexible Formatting**: Display backlinks in your preferred format:
+  - Comma list
+  - Bulleted list
+  - Numbered list
+  - One per line
+- **Custom Instructions**: Add special instructions to guide how connections are discovered
+- **Folder Exclusion**: Exclude specific folders from backlink discovery
+- **Connection Strength Control**: Adjust how strict or relaxed the connection criteria should be
 
-## Installation
+## Setup
 
-1. Download the latest release from the releases page
-2. Extract the zip file in your Obsidian vault's `.obsidian/plugins/` directory
-3. Enable the plugin in Obsidian's Community Plugins settings
-4. Configure your OpenAI API key in the plugin settings
-
-## Configuration
-
-1. Open Settings > Community Plugins > MindWeaver
-2. Enable the plugin by clicking the toggle switch
-3. Click the gear icon next to MindWeaver to open settings
-4. Enter your OpenAI API key
-5. (Optional) Add special instructions for connection discovery
-6. Adjust the relevance threshold as needed (0-1)
+1. Install the plugin from Obsidian's Community Plugins
+2. Choose your preferred AI model in settings:
+   - For OpenAI models: Enter your [OpenAI API key](https://platform.openai.com/)
+   - For Claude models: Enter your [Anthropic API key](https://console.anthropic.com/account/keys)
+   - For Llama 2 70B: Enter your [Together.ai API key](https://www.together.ai/)
+   - For local Llama: Set up [llama.cpp](https://github.com/ggerganov/llama.cpp) and enter your endpoint
+   - For Ollama: Install [Ollama](https://ollama.com/) and enter your endpoint (default: http://localhost:11434)
 
 ## Usage
 
 1. Open any note in your vault
-2. You can invoke MindWeaver in two ways:
-   - Type `/` and choose "MindWeaver: Weave Connections"
-   - Open command palette (Cmd/Ctrl + P) and search for "Weave Connections"
-3. MindWeaver will analyze your vault and automatically weave relevant connections
+2. Click the MindWeaver icon in the ribbon or use the command palette
+3. MindWeaver will analyze your note and discover meaningful connections
+4. Review the suggested backlinks and click to navigate to connected notes
 
-## Development
+## Configuration
 
-1. Clone this repository
-2. Install dependencies with `npm install`
-3. Build with `npm run build`
-4. Copy the contents of the `build` directory to your vault's plugins directory:
-   ```bash
-   cp build/* <vault>/.obsidian/plugins/mindweaver/
-   ```
+### Model Selection
+Choose your preferred model based on your needs:
+- GPT-4: Best accuracy but highest cost
+- GPT-3.5: Good balance of accuracy and cost
+- Claude 3.5: Latest Anthropic model with high capability
+- Claude 3: Balanced performance from Anthropic
+- Llama 2 70B: Low-cost option via Together.ai
+- Local options (slower but free):
+  - Llama: Self-hosted using llama.cpp
+  - Ollama: Easier setup with pre-built models
 
-The build directory will contain all necessary files:
-- `main.js`: The compiled plugin code
-- `manifest.json`: Plugin manifest
-- `styles.css`: Plugin styles
+### Connection Strength
+- Strict: Only very clear and direct connections
+- Balanced: Moderate threshold for connections
+- Relaxed: More connections, including indirect ones
+
+### Special Instructions
+Add custom instructions to guide how connections are discovered. For example:
+- "Only connect notes about similar technologies"
+- "Focus on methodological similarities"
+- "Connect notes with opposing viewpoints"
+
+## Support
+
+- Report issues on [GitHub](https://github.com/yourusername/mindweaver/issues)
 
 ## License
 
-MIT License
+[MIT License](LICENSE)
