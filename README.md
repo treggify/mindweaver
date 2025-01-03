@@ -71,6 +71,15 @@ Add custom instructions to guide how connections are discovered. For example:
 - "Focus on methodological similarities"
 - "Connect notes with opposing viewpoints"
 
+### Display Settings
+- **Show Header**: Toggle the "Related notes" header on/off
+- **Header Level**: Choose the header level (H1-H6) for the "Related notes" section
+- **Backlink Format**: Choose how backlinks are displayed:
+  - Comma list
+  - Bulleted list
+  - Numbered list
+  - One per line
+
 ## Support
 
 - Report issues on [GitHub](https://github.com/yourusername/mindweaver/issues)

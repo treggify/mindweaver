@@ -12,6 +12,7 @@ interface AutoBacklinksSettings {
     specialInstructions: string;
     format: 'comma' | 'bullet' | 'number' | 'line';
     showHeader: boolean;
+    headerLevel: 1 | 2 | 3 | 4 | 5 | 6;
     customTags: string[];
     useOnlyCustomTags: boolean;
 }
@@ -28,6 +29,7 @@ const DEFAULT_SETTINGS: AutoBacklinksSettings = {
     specialInstructions: '',
     format: 'comma',
     showHeader: true,
+    headerLevel: 3,
     customTags: [],
     useOnlyCustomTags: false
 }
@@ -423,33 +425,25 @@ export default class AutoBacklinksPlugin extends Plugin {
     }
 
     private async formatConnections(links: string[]): Promise<string> {
-        if (links.length === 0) {
-            return '';
-        }
+        if (links.length === 0) return '';
 
-        let result = '';
-        
-        // Add header if enabled
-        if (this.settings.showHeader) {
-            result += '### Related notes\n\n';
-        }
+        const formatters = {
+            bullet: (link: string) => `- ${link}`,
+            number: (link: string, i: number) => `${i + 1}. ${link}`,
+            line: (link: string) => link,
+            comma: (link: string) => link
+        };
 
-        // Format connections
-        switch (this.settings.format) {
-            case 'bullet':
-                result += links.map(link => `- ${link}`).join('\n');
-                break;
-            case 'number':
-                result += links.map((link, i) => `${i + 1}. ${link}`).join('\n');
-                break;
-            case 'line':
-                result += links.join('\n');
-                break;
-            default: // comma
-                result += links.join(', ');
-        }
+        const header = this.settings.showHeader 
+            ? `${'#'.repeat(this.settings.headerLevel)} Related notes\n`
+            : '';
+            
+        const formatter = formatters[this.settings.format];
+        const formattedLinks = this.settings.format === 'comma'
+            ? links.join(', ')
+            : links.map((link, i) => formatter(link, i)).join('\n');
 
-        return result + '\n';
+        return `${header}${formattedLinks}\n`;
     }
 
     private async checkTitlesRelevance(currentTitle: string, otherTitles: string[]): Promise<boolean[]> {
@@ -1110,6 +1104,27 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.showHeader)
                 .onChange(async (value) => {
                     this.plugin.settings.showHeader = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Header level
+        const headerLevelSetting = new Setting(containerEl)
+            .setName('Header level')
+            .setDesc('Level of the header (1-6)')
+            .addDropdown(dropdown => dropdown
+                .addOption('1', 'H1')
+                .addOption('2', 'H2')
+                .addOption('3', 'H3')
+                .addOption('4', 'H4')
+                .addOption('5', 'H5')
+                .addOption('6', 'H6')
+                .setValue(this.plugin.settings.headerLevel.toString())
+                .then(dropdown => {
+                    dropdown.selectEl.style.width = '240px';
+                })
+                .onChange(async (value) => {
+                    const level = parseInt(value) as 1 | 2 | 3 | 4 | 5 | 6;
+                    this.plugin.settings.headerLevel = level;
                     await this.plugin.saveSettings();
                 }));
 
