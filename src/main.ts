@@ -12,6 +12,8 @@ interface AutoBacklinksSettings {
     specialInstructions: string;
     format: 'comma' | 'bullet' | 'number' | 'line';
     showHeader: boolean;
+    customTags: string[];
+    useOnlyCustomTags: boolean;
 }
 
 const DEFAULT_SETTINGS: AutoBacklinksSettings = {
@@ -25,7 +27,9 @@ const DEFAULT_SETTINGS: AutoBacklinksSettings = {
     excludedFolders: [],
     specialInstructions: '',
     format: 'comma',
-    showHeader: true
+    showHeader: true,
+    customTags: [],
+    useOnlyCustomTags: false
 }
 
 const MODEL_PRICING: Record<string, {
@@ -331,6 +335,15 @@ export default class AutoBacklinksPlugin extends Plugin {
                     console.error('Error in weave-connections command:', error);
                     new Notice('Error executing command. Check console for details.');
                 }
+            }
+        });
+
+        // Add weavetag command
+        this.addCommand({
+            id: 'weavetag',
+            name: 'Weave tags into current note',
+            editorCallback: (editor: Editor, view: MarkdownView) => {
+                this.weaveTagsIntoNote(editor, view);
             }
         });
 
@@ -752,6 +765,116 @@ Are these notes meaningfully connected? Reply only with "true" or "false".`
             this.saveSettings();
         }
     }
+
+    private async weaveTagsIntoNote(editor: Editor, view: MarkdownView) {
+        const currentContent = editor.getValue();
+        
+        // Get available tags
+        let availableTags: string[] = [];
+        if (!this.settings.useOnlyCustomTags) {
+            // Get all files in vault
+            const files = this.app.vault.getMarkdownFiles();
+            const tagSet = new Set<string>();
+            
+            // Collect all unique tags
+            for (const file of files) {
+                const cache = this.app.metadataCache.getFileCache(file);
+                if (cache?.tags) {
+                    cache.tags.forEach(tagObj => {
+                        tagSet.add(tagObj.tag);
+                    });
+                }
+            }
+            
+            availableTags = Array.from(tagSet);
+        }
+        
+        // Add custom tags if any
+        if (this.settings.customTags.length > 0) {
+            const formattedCustomTags = this.settings.customTags.map((tag: string) => 
+                tag.startsWith('#') ? tag : `#${tag}`
+            );
+            availableTags = [...new Set([...availableTags, ...formattedCustomTags])];
+        }
+
+        if (availableTags.length === 0) {
+            new Notice('No tags available. Please add some tags to your vault or custom tags list.');
+            return;
+        }
+
+        // Prepare the prompt for the AI
+        const messages = [
+            {
+                role: 'system',
+                content: `You are a tag suggestion system. Your task is to analyze the given note content and suggest relevant tags from the provided list. Only suggest tags from the provided list, do not create new ones. Return the tags as a comma-separated list.`
+            },
+            {
+                role: 'user',
+                content: `Here is the note content:\n\n${currentContent}\n\nAvailable tags:\n${availableTags.join(', ')}\n\nPlease suggest relevant tags from this list only.`
+            }
+        ];
+
+        try {
+            let response;
+            switch (this.settings.model) {
+                case 'gpt-4':
+                case 'gpt-3.5-turbo':
+                    response = await this.makeOpenAIRequest(messages);
+                    break;
+                case 'claude-3.5':
+                case 'claude-3':
+                    response = await this.makeClaudeRequest(messages);
+                    break;
+                case 'llama-2-70b':
+                    response = await this.makeTogetherRequest(messages);
+                    break;
+                case 'llama-local':
+                    response = await this.makeLlamaRequest(messages);
+                    break;
+                default:
+                    throw new Error('Unsupported model');
+            }
+
+            // Extract tags from the response
+            const suggestedTags = response.choices[0].message.content
+                .split(',')
+                .map((tag: string) => tag.trim())
+                .filter((tag: string) => availableTags.includes(tag));
+
+            if (suggestedTags.length === 0) {
+                new Notice('No relevant tags found for this note.');
+                return;
+            }
+
+            // Insert tags at the end of the note
+            if (!view.file) {
+                new Notice('No active file.');
+                return;
+            }
+
+            const cache = this.app.metadataCache.getFileCache(view.file);
+            const existingTags = new Set(
+                cache?.tags?.map((t: { tag: string }) => t.tag) || []
+            );
+            
+            const newTags = suggestedTags.filter((tag: string) => !existingTags.has(tag));
+            
+            if (newTags.length === 0) {
+                new Notice('All relevant tags are already present in the note.');
+                return;
+            }
+
+            // Add new tags at the end of the note
+            const tagString = '\n' + newTags.join(' ');
+            editor.replaceRange(tagString, { line: editor.lastLine(), ch: editor.getLine(editor.lastLine()).length });
+            
+            new Notice(`Added ${newTags.length} new tags to the note.`);
+
+        } catch (error) {
+            console.error('Error in weaveTagsIntoNote:', error);
+            new Notice('Error suggesting tags. Please check the console for details.');
+        }
+    }
 }
 
 class FolderSuggestModal extends SuggestModal<TFolder> {
@@ -1070,6 +1193,62 @@ class AutoBacklinksSettingTab extends PluginSettingTab {
                 this.plugin.settings.excludedFolders = [];
                 await this.plugin.saveSettings();
             });
+
+        // Tag settings
+        const tagWeavingHeader = containerEl.createEl('h3', { text: 'Tag settings' });
+        tagWeavingHeader.style.marginBottom = '24px';
+        tagWeavingHeader.style.marginTop = '48px';
+
+        // Custom tags
+        const customTagsSetting = new Setting(containerEl)
+            .setName('Custom tags')
+            .setDesc('Tags that may not be in your vault yet.');
+
+        const customTagsContainer = customTagsSetting.settingEl.createDiv('custom-tags-container');
+        customTagsContainer.style.display = 'flex';
+        customTagsContainer.style.flexDirection = 'column';
+        customTagsContainer.style.gap = '12px';
+
+        // Create text area component
+        const customTagsTextAreaComponent = new TextAreaComponent(customTagsContainer);
+        customTagsTextAreaComponent
+            .setPlaceholder('One tag per line')
+            .setValue(this.plugin.settings.customTags.join('\n'));
+        
+        customTagsTextAreaComponent.inputEl.style.width = '240px';
+        customTagsTextAreaComponent.inputEl.style.height = '96px';
+        
+        customTagsTextAreaComponent.onChange(async (value) => {
+            this.plugin.settings.customTags = value.split('\n')
+                .map(tag => tag.trim())
+                .filter(tag => tag.length > 0);
+            await this.plugin.saveSettings();
+        });
+
+        // Button row below textarea
+        const customTagsButtonRow = customTagsContainer.createDiv('button-row');
+        customTagsButtonRow.style.display = 'flex';
+        customTagsButtonRow.style.gap = '8px';
+
+        // Clear button
+        const customTagsClearButton = new ButtonComponent(customTagsButtonRow)
+            .setButtonText('Clear')
+            .onClick(async () => {
+                customTagsTextAreaComponent.setValue('');
+                this.plugin.settings.customTags = [];
+                await this.plugin.saveSettings();
+            });
+
+        // Use only custom tags
+        const useOnlyCustomTagsSetting = new Setting(containerEl)
+            .setName('Use only custom tags')
+            .setDesc('Only consider connections with custom tags')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.useOnlyCustomTags)
+                .onChange(async (value) => {
+                    this.plugin.settings.useOnlyCustomTags = value;
+                    await this.plugin.saveSettings();
+                }));
 
         // Update API key visibility initially
         this.updateApiKeyVisibility();
