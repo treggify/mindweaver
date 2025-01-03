@@ -1,6 +1,6 @@
 # MindWeaver
 
-MindWeaver is an Obsidian plugin that uses AI to automatically discover and create meaningful backlinks between your notes. It analyzes your notes' content and suggests connections that you might have missed, helping you build a more interconnected knowledge base.
+MindWeaver is an Obsidian plugin that uses AI to automatically discover and create meaningful backlinks between your notes, and intelligently suggest relevant tags. It analyzes your notes' content and suggests connections that you might have missed, helping you build a more interconnected knowledge base.
 
 ## Features
 
@@ -10,6 +10,7 @@ MindWeaver is an Obsidian plugin that uses AI to automatically discover and crea
   - Anthropic: Claude 3.5 (Latest & most capable) or Claude 3 (Balanced performance)
   - Together.ai: Llama 2 70B (Low cost)
   - Self-hosted: Llama (Local) or Ollama (Local, easy setup)
+- **Intelligent Tag Weaving**: Automatically suggests and adds relevant tags from your existing tag collection
 - **Flexible Formatting**: Display backlinks in your preferred format:
   - Comma list
   - Bulleted list
@@ -36,6 +37,12 @@ MindWeaver is an Obsidian plugin that uses AI to automatically discover and crea
 3. MindWeaver will analyze your note and discover meaningful connections
 4. Review the suggested backlinks and click to navigate to connected notes
 
+### Tag Weaving
+1. Open any note
+2. Use the command palette and search for "Weave tags"
+3. MindWeaver will analyze your note and add relevant tags from your vault
+4. Tags are automatically added to the end of your note
+
 ## Configuration
 
 ### Model Selection
@@ -48,6 +55,10 @@ Choose your preferred model based on your needs:
 - Local options (slower but free):
   - Llama: Self-hosted using llama.cpp
   - Ollama: Easier setup with pre-built models
+
+### Tag Settings
+- **Custom Tags**: Add tags that may not be in your vault yet
+- **Use Only Custom Tags**: Toggle between using all vault tags or only your custom tags
 
 ### Connection Strength
 - Strict: Only very clear and direct connections
