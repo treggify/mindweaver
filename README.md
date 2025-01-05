@@ -91,7 +91,7 @@ Add custom instructions to guide how connections are discovered. For example:
 
 ## Support
 
-- Report issues on [GitHub](https://github.com/tregg/mindweaver/issues)
+- Report issues on [GitHub](https://github.com/treggify/mindweaver/issues)
 
 ## License
 
