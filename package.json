@@ -14,7 +14,7 @@
     "backlinks",
     "gpt"
   ],
-  "author": "Your Name",
+  "author": "MindWeaver Contributors",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^16.11.6",
